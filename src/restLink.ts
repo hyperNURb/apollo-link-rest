@@ -4,7 +4,6 @@ import {
   FragmentDefinitionNode,
   // Query Nodes
   DirectiveNode,
-  DocumentNode,
   FieldNode,
   SelectionSetNode,
 } from 'graphql';
@@ -25,8 +24,6 @@ import {
   isField,
   isInlineFragment,
   resultKeyNameFromField,
-  checkDocument,
-  removeDirectivesFromDocument,
 } from '@apollo/client/utilities';
 
 import { graphql } from 'graphql-anywhere/lib/async';
@@ -1122,11 +1119,6 @@ const DEFAULT_JSON_SERIALIZER: RestLink.Serializer = (
   };
 };
 
-const CONNECTION_REMOVE_CONFIG = {
-  test: (directive: DirectiveNode) => directive.name.value === 'rest',
-  remove: true,
-};
-
 /**
  * RestLink is an apollo-link for communicating with REST services using GraphQL on the client-side
  */
@@ -1140,7 +1132,6 @@ export class RestLink extends ApolloLink {
   private readonly customFetch: RestLink.CustomFetch;
   private readonly serializers: RestLink.Serializers;
   private readonly responseTransformer: RestLink.ResponseTransformer;
-  private readonly processedDocuments: Map<DocumentNode, DocumentNode>;
 
   constructor({
     uri,
@@ -1237,22 +1228,6 @@ export class RestLink extends ApolloLink {
       [DEFAULT_SERIALIZER_KEY]: defaultSerializer || DEFAULT_JSON_SERIALIZER,
       ...(bodySerializers || {}),
     };
-    this.processedDocuments = new Map();
-  }
-
-  private removeRestSetsFromDocument(query: DocumentNode): DocumentNode {
-    const cached = this.processedDocuments.get(query);
-    if (cached) return cached;
-
-    checkDocument(query);
-
-    const docClone = removeDirectivesFromDocument(
-      [CONNECTION_REMOVE_CONFIG],
-      query,
-    );
-
-    this.processedDocuments.set(query, docClone);
-    return docClone;
   }
 
   public request(
@@ -1265,8 +1240,6 @@ export class RestLink extends ApolloLink {
     if (!isRestQuery) {
       return forward(operation);
     }
-
-    const nonRest = this.removeRestSetsFromDocument(query);
 
     // 1. Use the user's merge policy if any
     let headersMergePolicy: RestLink.HeadersMergePolicy =
@@ -1320,40 +1293,32 @@ export class RestLink extends ApolloLink {
       responseTransformer: this.responseTransformer,
     };
     const resolverOptions = {};
-    let obs;
-    if (nonRest && forward) {
-      operation.query = nonRest;
-      obs = forward(operation);
-    } else obs = Observable.of({ data: {} });
 
-    return obs.flatMap(
-      ({ data, errors }) =>
-        new Observable(observer => {
-          graphql(
-            resolver,
-            queryWithTypename,
-            data,
-            requestContext,
-            variables,
-            resolverOptions,
-          )
-            .then(data => {
-              setContext({
-                restResponses: (context.restResponses || []).concat(
-                  requestContext.responses,
-                ),
-              });
-              observer.next({ data, errors });
-              observer.complete();
-            })
-            .catch(err => {
-              if (err.name === 'AbortError') return;
-              if (err.result && err.result.errors) {
-                observer.next(err.result);
-              }
-              observer.error(err);
-            });
-        }),
-    );
+    return new Observable(observer => {
+      graphql(
+        resolver,
+        queryWithTypename,
+        null,
+        requestContext,
+        variables,
+        resolverOptions,
+      )
+        .then(data => {
+          setContext({
+            restResponses: (context.restResponses || []).concat(
+              requestContext.responses,
+            ),
+          });
+          observer.next({ data });
+          observer.complete();
+        })
+        .catch(err => {
+          if (err.name === 'AbortError') return;
+          if (err.result && err.result.errors) {
+            observer.next(err.result);
+          }
+          observer.error(err);
+        });
+    });
   }
 }
